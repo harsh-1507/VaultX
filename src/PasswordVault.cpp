@@ -1,156 +1,237 @@
 
+#include "PasswordVault.h"
+#include "Crypto.h"
+
 #include <iostream>
+#include <sstream>
 #include <iomanip>
 #include <algorithm>
 #include <cctype>
-#include <string>
-
-#include "PasswordVault.h"
+#include <stdexcept>
 
 using namespace std;
 
-// Convert service name to lowercase
-string normalizeService(string service) {
+namespace {
+    string normalizeService(string service) {
+        transform(
+            service.begin(),
+            service.end(),
+            service.begin(),
+            [](unsigned char ch) {
+                return static_cast<char>(tolower(ch));
+            }
+        );
 
-    transform(service.begin(), service.end(),
-              service.begin(),
-              [](unsigned char ch) {
-                  return static_cast<char>(tolower(ch));
-              });
-
-    return service;
+        return service;
+    }
 }
 
-// Add account with duplicate detection
+PasswordVault::PasswordVault(
+    Database& database,
+    const string& masterPassword
+) : database(database), masterPassword(masterPassword) {
+    if (masterPassword.empty()) {
+        throw invalid_argument("Master password cannot be empty!");
+    }
+}
+
+string PasswordVault::serializeEntry(
+    const PasswordEntry& entry
+) const {
+    ostringstream output;
+
+    output << quoted(entry.getService()) << ' '
+           << quoted(entry.getUsername()) << ' '
+           << quoted(entry.getPassword()) << ' '
+           << quoted(entry.getCategory());
+
+    return output.str();
+}
+
+PasswordEntry PasswordVault::deserializeEntry(
+    const string& data
+) const {
+    istringstream input(data);
+
+    string service;
+    string username;
+    string password;
+    string category;
+
+    if (!(input >> quoted(service)
+                >> quoted(username)
+                >> quoted(password)
+                >> quoted(category))) {
+        throw runtime_error("Invalid decrypted account data!");
+    }
+
+    input >> ws;
+
+    if (!input.eof()) {
+        throw runtime_error("Unexpected data in decrypted account!");
+    }
+
+    return PasswordEntry(
+        service,
+        username,
+        password,
+        category
+    );
+}
+
 bool PasswordVault::addEntry(const PasswordEntry& entry) {
+    try {
+        vector<StoredEntry> existing = database.getAllEntries();
 
-    for (const PasswordEntry& existing : entries) {
+        for (const StoredEntry& stored : existing) {
+            string plaintext = Crypto::decrypt(
+                stored.encryptedData,
+                masterPassword
+            );
 
-        if (normalizeService(existing.getService()) ==
-            normalizeService(entry.getService())) {
+            PasswordEntry current = deserializeEntry(plaintext);
 
-            cout << "\n[ERROR] This service already exists!\n";
-            return false;
+            if (normalizeService(current.getService()) ==
+                normalizeService(entry.getService())) {
+                cout << "[ERROR] Service already exists!\n";
+                return false;
+            }
         }
+
+        string plaintext = serializeEntry(entry);
+
+        EncryptedData encrypted = Crypto::encrypt(
+            plaintext,
+            masterPassword
+        );
+
+        return database.insertEntry(encrypted);
     }
-
-    entries.push_back(entry);
-
-    cout << "\n[SUCCESS] Account added successfully!\n";
-    return true;
+    catch (const exception& e) {
+        cerr << "[VAULT ERROR] " << e.what() << endl;
+        return false;
+    }
 }
 
-// Display all accounts
 void PasswordVault::displayAll() const {
+    try {
+        vector<StoredEntry> entries = database.getAllEntries();
 
-    if (entries.empty()) {
-        cout << "\nYour vault is currently empty!\n";
-        return;
-    }
+        if (entries.empty()) {
+            cout << "\nVault is empty!\n";
+            return;
+        }
 
-    cout << "\n";
-    cout << left
-         << setw(20) << "SERVICE"
-         << setw(25) << "USERNAME"
-         << setw(20) << "CATEGORY" << endl;
+        cout << "\n========== YOUR VAULT ==========\n";
 
-    cout << string(65, '-') << endl;
+        for (const StoredEntry& stored : entries) {
+            string plaintext = Crypto::decrypt(
+                stored.encryptedData,
+                masterPassword
+            );
 
-    for (const PasswordEntry& entry : entries) {
+            PasswordEntry entry = deserializeEntry(plaintext);
 
-        cout << left
-             << setw(20) << entry.getService()
-             << setw(25) << entry.getUsername()
-             << setw(20) << entry.getCategory()
-             << endl;
-    }
-
-    cout << string(65, '-') << endl;
-    cout << "Total accounts: " << entries.size() << endl;
-}
-
-// Search account
-void PasswordVault::searchByService(const string& service) const {
-
-    string target = normalizeService(service);
-
-    for (const PasswordEntry& entry : entries) {
-
-        if (normalizeService(entry.getService()) == target) {
-
-            cout << "\n========== ACCOUNT FOUND ==========\n";
+            cout << "\nID       : " << stored.id << endl;
             cout << "Service  : " << entry.getService() << endl;
             cout << "Username : " << entry.getUsername() << endl;
             cout << "Category : " << entry.getCategory() << endl;
 
-            return;
+            // Never display passwords in the account list.
         }
+
+        cout << "\n================================\n";
     }
-
-    cout << "\n[ERROR] Account not found!\n";
-}
-
-// Delete account
-void PasswordVault::deleteEntry(const string& service) {
-
-    string target = normalizeService(service);
-
-    auto oldSize = entries.size();
-
-    entries.erase(
-        remove_if(
-            entries.begin(),
-            entries.end(),
-            [&target](const PasswordEntry& entry) {
-                return normalizeService(entry.getService()) == target;
-            }
-        ),
-        entries.end()
-    );
-
-    if (entries.size() < oldSize) {
-        cout << "\n[SUCCESS] Account deleted!\n";
-    }
-    else {
-        cout << "\n[ERROR] Account not found!\n";
+    catch (const exception& e) {
+        cerr << "[VAULT ERROR] " << e.what() << endl;
     }
 }
 
-// Edit existing account
-void PasswordVault::editEntry(const string& service,
-                              const string& newUsername,
-                              const string& newPassword,
-                              const string& newCategory) {
+void PasswordVault::searchByService(
+    const string& service
+) const {
+    try {
+        vector<StoredEntry> entries = database.getAllEntries();
 
-    string target = normalizeService(service);
+        for (const StoredEntry& stored : entries) {
+            string plaintext = Crypto::decrypt(
+                stored.encryptedData,
+                masterPassword
+            );
 
-    for (PasswordEntry& entry : entries) {
+            PasswordEntry entry = deserializeEntry(plaintext);
 
-        if (normalizeService(entry.getService()) == target) {
+            if (normalizeService(entry.getService()) ==
+                normalizeService(service)) {
 
-            // Validate all new values before modifying the object
-            if (newUsername.empty()) {
-                throw invalid_argument("Username cannot be empty!");
+                cout << "\n========== ACCOUNT FOUND ==========\n";
+                cout << "ID       : " << stored.id << endl;
+                cout << "Service  : " << entry.getService() << endl;
+                cout << "Username : " << entry.getUsername() << endl;
+                cout << "Category : " << entry.getCategory() << endl;
+
+                return;
             }
-
-            if (newPassword.length() < 6) {
-                throw invalid_argument(
-                    "Password must contain at least 6 characters!"
-                );
-            }
-
-            if (newCategory.empty()) {
-                throw invalid_argument("Category cannot be empty!");
-            }
-
-            entry.setUsername(newUsername);
-            entry.setPassword(newPassword);
-            entry.setCategory(newCategory);
-
-            cout << "\n[SUCCESS] Account updated successfully!\n";
-            return;
         }
-    }
 
-    cout << "\n[ERROR] Account not found!\n";
+        cout << "[ERROR] Account not found!\n";
+    }
+    catch (const exception& e) {
+        cerr << "[VAULT ERROR] " << e.what() << endl;
+    }
+}
+
+bool PasswordVault::deleteEntry(int id) {
+    return database.deleteEntry(id);
+}
+
+bool PasswordVault::editEntry(
+    int id,
+    const string& newUsername,
+    const string& newPassword,
+    const string& newCategory
+) {
+    try {
+        if (newUsername.empty() ||
+            newPassword.length() < 6 ||
+            newCategory.empty()) {
+            throw invalid_argument("Invalid account details!");
+        }
+
+        vector<StoredEntry> entries = database.getAllEntries();
+
+        for (const StoredEntry& stored : entries) {
+            if (stored.id != id) {
+                continue;
+            }
+
+            string plaintext = Crypto::decrypt(
+                stored.encryptedData,
+                masterPassword
+            );
+
+            PasswordEntry oldEntry = deserializeEntry(plaintext);
+
+            PasswordEntry updatedEntry(
+                oldEntry.getService(),
+                newUsername,
+                newPassword,
+                newCategory
+            );
+
+            EncryptedData encrypted = Crypto::encrypt(
+                serializeEntry(updatedEntry),
+                masterPassword
+            );
+
+            return database.updateEntry(id, encrypted);
+        }
+
+        cout << "[ERROR] Account not found!\n";
+        return false;
+    }
+    catch (const exception& e) {
+        cerr << "[VAULT ERROR] " << e.what() << endl;
+        return false;
+    }
 }
