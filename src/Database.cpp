@@ -1,4 +1,3 @@
-
 #include "Database.h"
 
 #include <iostream>
@@ -123,6 +122,7 @@ Database::Database(const string& databaseName)
     }
 
     sqlite3_busy_timeout(db, 5000);
+    sqlite3_exec(db, "PRAGMA secure_delete=ON;", nullptr, nullptr, nullptr);
 }
 
 // Destructor
@@ -401,4 +401,23 @@ bool Database::deleteEntry(int id) {
     }
 
     return true;
+}
+
+bool Database::hasMasterPassword() const {
+    sqlite3_stmt* statement = nullptr;
+
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM vault_metadata;",
+                           -1, &statement, nullptr) != SQLITE_OK) {
+        throw runtime_error(string("Query failed: ") + sqlite3_errmsg(db));
+    }
+
+    bool found = sqlite3_step(statement) == SQLITE_ROW &&
+                 sqlite3_column_int(statement, 0) > 0;
+
+    sqlite3_finalize(statement);
+    return found;
+}
+
+long long Database::lastInsertId() const {
+    return sqlite3_last_insert_rowid(db);
 }

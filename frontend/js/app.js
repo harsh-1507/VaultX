@@ -24,6 +24,52 @@ const icons = {
     "Wi-Fi": "◉"
 };
 
+// Fields for each record type. Must match the schema in src/Entry.cpp.
+const TYPE_FIELDS = {
+    "Login": [
+        { k: "username", l: "Username / Email", req: true, ph: "you@example.com" },
+        { k: "password", l: "Password", req: true, secret: true, gen: true },
+        { k: "url", l: "Website URL", type: "url", ph: "https://example.com" }
+    ],
+    "Secure Note": [],
+    "Card": [
+        { k: "cardholder", l: "Cardholder name", req: true, ph: "Name on card" },
+        { k: "number", l: "Card number", req: true, secret: true, ph: "1234 5678 9012 3456" },
+        { k: "expiry", l: "Expiry date", req: true, ph: "MM/YY" },
+        { k: "cvv", l: "CVV", secret: true },
+        { k: "pin", l: "PIN", secret: true }
+    ],
+    "Identity": [
+        { k: "fullName", l: "Full name", req: true },
+        { k: "email", l: "Email", type: "email" },
+        { k: "phone", l: "Phone", type: "tel" },
+        { k: "address", l: "Address" },
+        { k: "idNumber", l: "ID number", secret: true }
+    ],
+    "API Key": [
+        { k: "keyName", l: "Key name / service", req: true, ph: "e.g. Stripe live key" },
+        { k: "apiKey", l: "API key", req: true, secret: true, gen: true },
+        { k: "endpoint", l: "Endpoint URL", type: "url", ph: "https://api.example.com" }
+    ],
+    "Wi-Fi": [
+        { k: "ssid", l: "Network name (SSID)", req: true },
+        { k: "password", l: "Password", req: true, secret: true, gen: true },
+        { k: "security", l: "Security type", opts: ["WPA3", "WPA2", "WPA", "WEP", "None"] }
+    ]
+};
+
+const SUBTITLE_KEY = {
+    "Login": "username",
+    "Card": "cardholder",
+    "Identity": "fullName",
+    "API Key": "keyName",
+    "Wi-Fi": "ssid"
+};
+
+function subtitleOf(record) {
+    return record.fields[SUBTITLE_KEY[record.type]] || "";
+}
+
 const pageInfo = {
     all: ["YOUR PERSONAL SPACE", "All items", "Everything important, protected in one place."],
     favorites: ["QUICK ACCESS", "Favorites", "Your most important records."],
@@ -60,11 +106,25 @@ function escapeHTML(value) {
     })[character]);
 }
 
+const NON_FIELD_KEYS = new Set([
+    "id", "type", "title", "service", "folder", "category", "notes",
+    "favorite", "deleted", "created", "createdAt", "website"
+]);
+
 function normalizeRecord(raw) {
+    const fields = {};
+
+    for (const [key, value] of Object.entries(raw)) {
+        if (!NON_FIELD_KEYS.has(key) && typeof value === "string" && value) {
+            fields[key] = value;
+        }
+    }
+
     return {
         id: Number(raw.id),
         title: String(raw.title ?? raw.service ?? ""),
         type: String(raw.type ?? "Login"),
+        fields,
         username: String(raw.username ?? ""),
         password: String(raw.password ?? ""),
         url: String(raw.url ?? raw.website ?? ""),
@@ -100,6 +160,14 @@ async function apiRequest(path, options = {}) {
     }
 
     if (!response.ok) {
+        // The server locks itself after 15 idle minutes.
+        if (response.status === 401 && isUnlocked && !path.endsWith("/unlock")) {
+            isUnlocked = false;
+            records = [];
+            render();
+            setConnectionStatus("Vault locked");
+        }
+
         throw new Error(
             body.error ||
             body.message ||
@@ -121,17 +189,84 @@ function setConnectionStatus(message, connected = false) {
     }
 }
 
+let vaultInitialized = true;
+
+function masterScore(password) {
+    let score = 0;
+    if (password.length >= 10) score++;
+    if (password.length >= 14) score++;
+    if (/[a-z]/.test(password) && /[A-Z]/.test(password)) score++;
+    if (/\d/.test(password) && /[^A-Za-z0-9]/.test(password)) score++;
+    return score;
+}
+
+function updateUnlockStrength() {
+    const bar = $("unlockStrength");
+    const score = masterScore($("unlockPassword").value);
+    bar.style.width = `${score * 25}%`;
+    bar.style.background =
+        ["#f07178", "#f07178", "#f5b84b", "#6cc17a", "#35c995"][score];
+}
+
+// Opens the unlock dialog (or the "create vault" dialog on first run).
 async function unlockVault() {
-    const masterPassword = window.prompt(
-        "Enter your VaultX master password:"
-    );
+    try {
+        const status = await apiRequest("/api/status");
+        vaultInitialized = status.initialized;
 
-    if (masterPassword === null) return;
-
-    if (!masterPassword) {
-        showToast("Master password cannot be empty.");
-        return;
+        if (status.unlocked && !isUnlocked) {
+            isUnlocked = true;
+            await loadEntries();
+            setConnectionStatus("Connected · Vault unlocked", true);
+            return;
+        }
+    } catch (error) {
+        setConnectionStatus("Backend unavailable");
+        return showToast("Cannot reach the VaultX server.");
     }
+
+    const creating = !vaultInitialized;
+
+    $("unlockEyebrow").textContent = creating ? "WELCOME" : "WELCOME BACK";
+    $("unlockTitle").textContent = creating ? "Create your vault" : "Unlock vault";
+    $("unlockHint").textContent = creating
+        ? "Choose a strong master password (at least 10 characters). It cannot be recovered if you forget it."
+        : "Enter your master password to decrypt your records.";
+    $("unlockSubmit").textContent = creating ? "Create vault" : "Unlock";
+    $("unlockPassword").autocomplete = creating ? "new-password" : "current-password";
+    $("confirmBlock").classList.toggle("hidden", !creating);
+    $("unlockError").textContent = "";
+    $("unlockForm").reset();
+    updateUnlockStrength();
+
+    openModal("unlockModal");
+    setTimeout(() => $("unlockPassword").focus(), 50);
+}
+
+async function submitUnlock(event) {
+    event.preventDefault();
+
+    const masterPassword = $("unlockPassword").value;
+    const error = $("unlockError");
+    const button = $("unlockSubmit");
+    const label = button.textContent;
+
+    error.textContent = "";
+
+    if (!vaultInitialized) {
+        if (masterPassword.length < 10) {
+            error.textContent = "Use at least 10 characters.";
+            return;
+        }
+
+        if (masterPassword !== $("unlockConfirm").value) {
+            error.textContent = "Passwords do not match.";
+            return;
+        }
+    }
+
+    button.disabled = true;
+    button.textContent = "Please wait…";
 
     try {
         await apiRequest("/api/unlock", {
@@ -140,16 +275,24 @@ async function unlockVault() {
         });
 
         isUnlocked = true;
+        vaultInitialized = true;
+
+        $("unlockForm").reset();
+        closeModal("unlockModal");
 
         await loadEntries();
 
         setConnectionStatus("Connected · Vault unlocked", true);
         showToast("Vault unlocked.");
 
-    } catch (error) {
+    } catch (err) {
         isUnlocked = false;
-        showToast(error.message);
-        setConnectionStatus("Connection failed");
+        error.textContent = err.message;
+        setConnectionStatus("Vault locked");
+
+    } finally {
+        button.disabled = false;
+        button.textContent = label;
     }
 }
 
@@ -241,7 +384,7 @@ function visibleRecords() {
     if (query) {
         list = list.filter(record =>
             record.title.toLowerCase().includes(query) ||
-            record.username.toLowerCase().includes(query) ||
+            subtitleOf(record).toLowerCase().includes(query) ||
             record.folder.toLowerCase().includes(query) ||
             record.type.toLowerCase().includes(query) ||
             record.notes.toLowerCase().includes(query)
@@ -263,7 +406,7 @@ function renderRecordCard(record) {
                 <div class="record-main">
                     <strong>${escapeHTML(record.title)}</strong>
                     <small>
-                        ${escapeHTML(record.username || record.type)}
+                        ${escapeHTML(subtitleOf(record) || record.type)}
                     </small>
                 </div>
 
@@ -802,62 +945,95 @@ function openNewItem() {
     $("itemType").value =
         currentCategory || "Login";
 
-    $("itemPassword").type = "password";
-    $("togglePassword").textContent = "Show";
-
     updateTypeFields();
 
     openModal("itemModal");
 }
 
-function updateTypeFields() {
-    const type = $("itemType").value;
+function fieldHTML(field, value) {
+    const id = `f_${field.k}`;
+    const label = `<label for="${id}">${escapeHTML(field.l)}${field.req ? " *" : ""}</label>`;
 
-    $("loginFields").style.display =
-        type === "Login" ? "block" : "none";
+    if (field.opts) {
+        return label + `
+            <select id="${id}">
+                ${field.opts.map(option => `
+                    <option${option === value ? " selected" : ""}>${escapeHTML(option)}</option>
+                `).join("")}
+            </select>`;
+    }
+
+    if (field.secret) {
+        return label + `
+            <div class="input-with-action">
+                <input id="${id}" type="password" maxlength="256" autocomplete="off"
+                    placeholder="${escapeHTML(field.ph || "")}" value="${escapeHTML(value)}">
+                <button type="button" class="inline-button" data-toggle="${field.k}">Show</button>
+                ${field.gen ? `<button type="button" class="inline-button" data-generate="${field.k}">Generate</button>` : ""}
+            </div>`;
+    }
+
+    return label + `
+        <input id="${id}" type="${field.type || "text"}" maxlength="500" autocomplete="off"
+            placeholder="${escapeHTML(field.ph || "")}" value="${escapeHTML(value)}">`;
+}
+
+function updateTypeFields(values = {}) {
+    const type = $("itemType").value;
+    const defs = TYPE_FIELDS[type] || [];
+
+    $("typeFields").innerHTML =
+        defs.map(field => fieldHTML(field, values[field.k] || "")).join("");
+
+    const isNote = type === "Secure Note";
+
+    $("notesLabel").textContent = isNote ? "Note content *" : "Notes";
+    $("itemNotes").rows = isNote ? 8 : 3;
 }
 
 function itemPayload() {
-    return {
+    const type = $("itemType").value;
+
+    const item = {
         title: $("itemTitle").value.trim(),
-
-        type: $("itemType").value,
-
-        username:
-            $("itemType").value === "Login"
-                ? $("itemUsername").value.trim()
-                : "",
-
-        password:
-            $("itemType").value === "Login"
-                ? $("itemPassword").value
-                : "",
-
-        url:
-            $("itemType").value === "Login"
-                ? $("itemUrl").value.trim()
-                : "",
-
+        type,
         folder: $("itemFolder").value,
-
         notes: $("itemNotes").value.trim()
     };
+
+    for (const field of TYPE_FIELDS[type] || []) {
+        const input = $(`f_${field.k}`);
+        if (input) item[field.k] = field.secret ? input.value : input.value.trim();
+    }
+
+    return item;
+}
+
+function validateItem(item) {
+    if (!item.title) return "Please enter a title.";
+
+    for (const field of TYPE_FIELDS[item.type] || []) {
+        if (field.req && !item[field.k]) return `${field.l} is required.`;
+    }
+
+    if (item.type === "Secure Note" && !item.notes) {
+        return "Note content is required.";
+    }
+
+    if (item.type === "Login" && item.password.length < 6) {
+        return "Password must contain at least 6 characters.";
+    }
+
+    return "";
 }
 
 async function saveItem(event) {
     event.preventDefault();
 
     const item = itemPayload();
+    const problem = validateItem(item);
 
-    if (!item.title) {
-        return showToast("Please enter a title.");
-    }
-
-    if (item.type === "Login" && item.password.length < 6) {
-        return showToast(
-            "Password must contain at least 6 characters."
-        );
-    }
+    if (problem) return showToast(problem);
 
     try {
 
@@ -895,64 +1071,60 @@ async function saveItem(event) {
     }
 }
 
+let detailsId = null;
+
 function showDetails(id) {
     const item = records.find(r => r.id === id);
 
     if (!item) return;
 
+    detailsId = id;
     $("detailsTitle").textContent = item.title;
 
-    const rows = [
-        ["Type", item.type],
-        ["Username", item.username],
-        ["Password", item.password],
-        ["Website", item.url],
-        ["Folder", item.folder],
-        ["Notes", item.notes]
-    ].filter(row => row[1]);
+    const inTrash = item.deleted;
+    const plainRow = (label, value, className = "") => `
+        <div class="detail-row">
+            <small>${escapeHTML(label)}</small>
+            <strong class="${className}">${escapeHTML(value)}</strong>
+        </div>`;
 
-    $("detailsContent").innerHTML =
-        rows.map(([label, value]) => `
-            <div class="detail-row">
-                <small>${escapeHTML(label)}</small>
-                <strong>${escapeHTML(value)}</strong>
-            </div>
-        `).join("") + `
+    let html = plainRow("Type", `${icons[item.type] || ""} ${item.type}`);
 
+    for (const field of TYPE_FIELDS[item.type] || []) {
+        const value = item.fields[field.k];
+
+        if (!value) continue;
+
+        html += `
+            <div class="detail-row with-actions">
+                <div class="detail-main">
+                    <small>${escapeHTML(field.l)}</small>
+                    <strong data-value="${field.k}" data-masked="${field.secret ? 1 : 0}">${
+                        field.secret ? "••••••••••" : escapeHTML(value)
+                    }</strong>
+                </div>
+                <div class="row-buttons">
+                    ${field.secret ? `<button class="mini-button" data-reveal="${field.k}">Show</button>` : ""}
+                    <button class="mini-button" data-copy-field="${field.k}">Copy</button>
+                </div>
+            </div>`;
+    }
+
+    html += plainRow("Folder", item.folder);
+
+    if (item.notes) html += plainRow("Notes", item.notes, "pre");
+
+    html += `
         <div class="detail-actions">
-
-            ${item.type === "Login" ? `
-                <button
-                    class="secondary-button"
-                    data-copy="${item.id}"
-                    data-field="username">
-                    Copy username
-                </button>
-
-                <button
-                    class="secondary-button"
-                    data-copy="${item.id}"
-                    data-field="password">
-                    Copy password
-                </button>
-            ` : ""}
-
-            <button
-                class="secondary-button"
-                data-edit="${item.id}">
-                Edit
+            ${inTrash
+                ? `<button class="secondary-button" data-restore="${item.id}">Restore</button>`
+                : `<button class="secondary-button" data-edit="${item.id}">Edit</button>`}
+            <button class="secondary-button danger" data-delete="${item.id}">
+                ${inTrash ? "Permanently delete" : "Move to trash"}
             </button>
+        </div>`;
 
-            <button
-                class="secondary-button"
-                data-delete="${item.id}">
-                ${currentPage === "trash"
-                    ? "Permanently delete"
-                    : "Move to trash"}
-            </button>
-
-        </div>
-    `;
+    $("detailsContent").innerHTML = html;
 
     openModal("detailsModal");
 }
@@ -967,18 +1139,39 @@ function editItem(id) {
     $("itemId").value = id;
     $("itemTitle").value = item.title;
     $("itemType").value = item.type;
-    $("itemUsername").value = item.username;
-    $("itemPassword").value = item.password;
-    $("itemUrl").value = item.url;
+
+    if (![...$("itemFolder").options].some(o => o.value === item.folder)) {
+        $("itemFolder").add(new Option(item.folder));
+    }
+
     $("itemFolder").value = item.folder;
     $("itemNotes").value = item.notes;
 
-    $("modalTitle").textContent = "Edit item";
+    updateTypeFields(item.fields);
 
-    updateTypeFields();
+    $("modalTitle").textContent = "Edit item";
 
     closeModal("detailsModal");
     openModal("itemModal");
+}
+
+async function restoreItem(id) {
+    try {
+        await apiRequest(
+            `/api/entries/${encodeURIComponent(id)}/trash`,
+            {
+                method: "PATCH",
+                body: JSON.stringify({ deleted: false })
+            }
+        );
+
+        showToast("Record restored.");
+        closeModal("detailsModal");
+        await loadEntries();
+
+    } catch (error) {
+        showToast(`Could not restore record: ${error.message}`);
+    }
 }
 
 async function deleteItem(id) {
@@ -1194,19 +1387,25 @@ function setupPageGenerator() {
     generate();
 }
 
+let clipboardTimer = null;
+
 async function copyText(value) {
     if (!value) {
         return showToast("Nothing to copy.");
     }
 
     try {
-
         await navigator.clipboard.writeText(value);
 
-        showToast("Copied to clipboard.");
+        showToast("Copied. Clipboard clears in 30 seconds.");
+
+        clearTimeout(clipboardTimer);
+        clipboardTimer = setTimeout(
+            () => navigator.clipboard.writeText(" ").catch(() => {}),
+            30000
+        );
 
     } catch {
-
         showToast(
             "Clipboard access unavailable. Use the VaultX website in a secure browser context."
         );
@@ -1241,7 +1440,7 @@ $("itemForm").addEventListener(
 
 $("itemType").addEventListener(
     "change",
-    updateTypeFields
+    () => updateTypeFields()
 );
 
 $("searchInput").addEventListener(
@@ -1259,42 +1458,42 @@ $("lockButton").addEventListener(
     () => isUnlocked ? lockVault() : unlockVault()
 );
 
-$("togglePassword").addEventListener("click", () => {
+$("typeFields").addEventListener("click", event => {
 
-    const input = $("itemPassword");
+    const button = event.target.closest("button");
 
-    input.type =
-        input.type === "password"
-            ? "text"
-            : "password";
+    if (!button) return;
 
-    $("togglePassword").textContent =
-        input.type === "password"
-            ? "Show"
-            : "Hide";
-});
+    if (button.dataset.toggle) {
+        const input = $(`f_${button.dataset.toggle}`);
 
-$("generateInForm").addEventListener("click", () => {
+        input.type = input.type === "password" ? "text" : "password";
+        button.textContent = input.type === "password" ? "Show" : "Hide";
+    }
 
-    try {
-
-        $("itemPassword").value =
-            generatePassword(
+    if (button.dataset.generate) {
+        try {
+            $(`f_${button.dataset.generate}`).value = generatePassword(
                 20,
-                {
-                    upper: true,
-                    lower: true,
-                    numbers: true,
-                    symbols: true
-                }
+                { upper: true, lower: true, numbers: true, symbols: true }
             );
 
-        showToast("Password generated.");
+            showToast("Generated a strong value.");
 
-    } catch (error) {
-
-        showToast(error.message);
+        } catch (error) {
+            showToast(error.message);
+        }
     }
+});
+
+$("unlockForm").addEventListener("submit", submitUnlock);
+$("unlockPassword").addEventListener("input", updateUnlockStrength);
+
+$("toggleUnlock").addEventListener("click", () => {
+    const input = $("unlockPassword");
+
+    input.type = input.type === "password" ? "text" : "password";
+    $("toggleUnlock").textContent = input.type === "password" ? "Show" : "Hide";
 });
 
 $("passwordLength").addEventListener(
@@ -1413,28 +1612,25 @@ $("detailsContent").addEventListener("click", event => {
 
     if (!button) return;
 
-    const id = Number(
-        button.dataset.copy ||
-        button.dataset.edit ||
-        button.dataset.delete
-    );
+    const item = records.find(r => r.id === detailsId);
 
-    if (button.dataset.copy) {
+    if (button.dataset.reveal && item) {
+        const key = button.dataset.reveal;
+        const element = $("detailsContent").querySelector(`[data-value="${key}"]`);
+        const hidden = element.dataset.masked === "1";
 
-        const item = records.find(r => r.id === id);
-
-        if (item) {
-            copyText(item[button.dataset.field]);
-        }
+        element.textContent = hidden ? item.fields[key] : "••••••••••";
+        element.dataset.masked = hidden ? "0" : "1";
+        button.textContent = hidden ? "Hide" : "Show";
     }
 
-    if (button.dataset.edit) {
-        editItem(id);
+    if (button.dataset.copyField && item) {
+        copyText(item.fields[button.dataset.copyField]);
     }
 
-    if (button.dataset.delete) {
-        deleteItem(id);
-    }
+    if (button.dataset.edit) editItem(Number(button.dataset.edit));
+    if (button.dataset.delete) deleteItem(Number(button.dataset.delete));
+    if (button.dataset.restore) restoreItem(Number(button.dataset.restore));
 });
 
 // Keyboard shortcuts
@@ -1453,7 +1649,8 @@ document.addEventListener("keydown", event => {
         [
             "itemModal",
             "generatorModal",
-            "detailsModal"
+            "detailsModal",
+            "unlockModal"
         ].forEach(closeModal);
     }
 });
@@ -1464,5 +1661,8 @@ document.addEventListener("keydown", event => {
 render();
 
 setConnectionStatus("C++ API · Locked");
+
+// Checks the server and opens the unlock (or create-vault) dialog.
+unlockVault();
 
 console.log("VaultX frontend connected to API.");

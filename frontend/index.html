@@ -61,7 +61,7 @@
             <button class="nav-item" data-page="settings"><span>⚙</span> Settings</button>
             <div class="sidebar-status">
                 <span class="status-dot"></span>
-                Demo mode · Not connected
+                Connecting…
             </div>
         </div>
     </aside>
@@ -123,20 +123,7 @@
             <label>Title</label>
             <input id="itemTitle" required maxlength="80" placeholder="e.g. GitHub">
 
-            <div id="loginFields">
-                <label>Username / Email</label>
-                <input id="itemUsername" maxlength="150" placeholder="you@example.com">
-
-                <label>Password</label>
-                <div class="input-with-action">
-                    <input id="itemPassword" type="password" maxlength="256" placeholder="Enter password">
-                    <button type="button" class="inline-button" id="togglePassword">Show</button>
-                    <button type="button" class="inline-button" id="generateInForm">Generate</button>
-                </div>
-
-                <label>Website URL</label>
-                <input id="itemUrl" type="url" maxlength="500" placeholder="https://example.com">
-            </div>
+            <div id="typeFields"></div>
 
             <label>Folder</label>
             <select id="itemFolder">
@@ -146,7 +133,7 @@
                 <option>Social</option>
             </select>
 
-            <label>Notes</label>
+            <label id="notesLabel" for="itemNotes">Notes</label>
             <textarea id="itemNotes" rows="3" maxlength="2000" placeholder="Additional information..."></textarea>
 
             <div class="modal-actions">
@@ -197,6 +184,36 @@
             <button class="close-button" data-close="detailsModal">×</button>
         </div>
         <div id="detailsContent"></div>
+    </div>
+</div>
+
+<!-- Unlock / create vault modal -->
+<div class="modal-backdrop hidden" id="unlockModal">
+    <div class="modal small-modal">
+        <div class="modal-header">
+            <div>
+                <div class="eyebrow" id="unlockEyebrow">WELCOME BACK</div>
+                <h2 id="unlockTitle">Unlock vault</h2>
+            </div>
+            <button class="close-button" data-close="unlockModal">×</button>
+        </div>
+        <form id="unlockForm" autocomplete="off">
+            <p class="modal-hint" id="unlockHint"></p>
+            <label for="unlockPassword">Master password</label>
+            <div class="input-with-action">
+                <input id="unlockPassword" type="password" maxlength="1024" required autocomplete="current-password">
+                <button type="button" class="inline-button" id="toggleUnlock">Show</button>
+            </div>
+            <div id="confirmBlock" class="hidden">
+                <label for="unlockConfirm">Confirm master password</label>
+                <input id="unlockConfirm" type="password" maxlength="1024" autocomplete="new-password">
+                <div class="strength"><i id="unlockStrength"></i></div>
+            </div>
+            <p class="form-error" id="unlockError"></p>
+            <div class="modal-actions">
+                <button type="submit" class="primary-button" id="unlockSubmit">Unlock</button>
+            </div>
+        </form>
     </div>
 </div>
 

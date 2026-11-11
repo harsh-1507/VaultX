@@ -35,6 +35,8 @@ public:
     );
     bool initializeOrVerifyMasterPassword(const string& masterPassword);
     bool deleteEntry(int id);
+    bool hasMasterPassword() const;
+    long long lastInsertId() const;
 };
 
 #endif
