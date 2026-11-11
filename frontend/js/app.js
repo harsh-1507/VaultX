@@ -93,6 +93,7 @@ function openModal(id) {
 }
 
 function closeModal(id) {
+    if (id === "detailsModal") detailsRecord = null;  // drop decrypted values
     $(id)?.classList.add("hidden");
 }
 
@@ -108,7 +109,8 @@ function escapeHTML(value) {
 
 const NON_FIELD_KEYS = new Set([
     "id", "type", "title", "service", "folder", "category", "notes",
-    "favorite", "deleted", "created", "createdAt", "website"
+    "favorite", "deleted", "created", "createdAt", "website",
+    "hint", "strength", "reused", "hasNotes"
 ]);
 
 function normalizeRecord(raw) {
@@ -130,6 +132,10 @@ function normalizeRecord(raw) {
         url: String(raw.url ?? raw.website ?? ""),
         folder: String(raw.folder ?? raw.category ?? "Personal"),
         notes: String(raw.notes ?? ""),
+        hint: String(raw.hint ?? ""),
+        strength: Number(raw.strength ?? 0),
+        reused: Boolean(raw.reused),
+        hasNotes: Boolean(raw.hasNotes),
         favorite: Boolean(raw.favorite),
         deleted: Boolean(raw.deleted),
         created: Number(raw.created ?? raw.createdAt ?? Date.now())
@@ -166,6 +172,7 @@ async function apiRequest(path, options = {}) {
             records = [];
             render();
             setConnectionStatus("Vault locked");
+            unlockVault("Locked after inactivity. Enter your master password.");
         }
 
         throw new Error(
@@ -209,7 +216,7 @@ function updateUnlockStrength() {
 }
 
 // Opens the unlock dialog (or the "create vault" dialog on first run).
-async function unlockVault() {
+async function unlockVault(notice = "") {
     try {
         const status = await apiRequest("/api/status");
         vaultInitialized = status.initialized;
@@ -227,16 +234,16 @@ async function unlockVault() {
 
     const creating = !vaultInitialized;
 
-    $("unlockEyebrow").textContent = creating ? "WELCOME" : "WELCOME BACK";
-    $("unlockTitle").textContent = creating ? "Create your vault" : "Unlock vault";
+    $("unlockTitle").textContent = creating ? "Create your vault" : "Unlock VaultX";
     $("unlockHint").textContent = creating
         ? "Choose a strong master password (at least 10 characters). It cannot be recovered if you forget it."
         : "Enter your master password to decrypt your records.";
     $("unlockSubmit").textContent = creating ? "Create vault" : "Unlock";
     $("unlockPassword").autocomplete = creating ? "new-password" : "current-password";
     $("confirmBlock").classList.toggle("hidden", !creating);
-    $("unlockError").textContent = "";
     $("unlockForm").reset();
+    $("unlockError").textContent = notice;
+    $("unlockError").className = notice ? "form-error info" : "form-error";
     updateUnlockStrength();
 
     openModal("unlockModal");
@@ -252,6 +259,7 @@ async function submitUnlock(event) {
     const label = button.textContent;
 
     error.textContent = "";
+    error.className = "form-error";
 
     if (!vaultInitialized) {
         if (masterPassword.length < 10) {
@@ -312,13 +320,18 @@ async function lockVault() {
     render();
 
     setConnectionStatus("Vault locked");
-    showToast("Vault locked.");
+    unlockVault("Vault locked.");
 }
 
 async function loadEntries() {
     if (isLoading) return;
 
     isLoading = true;
+
+    if (!records.length && $("pageContent")) {
+        $("pageContent").innerHTML =
+            '<div class="loading-state"><span class="spinner"></span>Decrypting your vault…</div>';
+    }
 
     try {
         const data = await apiRequest("/api/entries");
@@ -406,7 +419,7 @@ function renderRecordCard(record) {
                 <div class="record-main">
                     <strong>${escapeHTML(record.title)}</strong>
                     <small>
-                        ${escapeHTML(subtitleOf(record) || record.type)}
+                        ${escapeHTML([subtitleOf(record), record.hint].filter(Boolean).join(" · ") || record.type)}
                     </small>
                 </div>
 
@@ -435,19 +448,9 @@ function renderRecordCard(record) {
         </article>`;
 }
 
-function passwordScore(password) {
-    let score = 0;
-
-    if (password.length >= 12) score++;
-    if (password.length >= 16) score++;
-
-    if (/[a-z]/.test(password) &&
-        /[A-Z]/.test(password)) score++;
-
-    if (/[0-9]/.test(password)) score++;
-    if (/[^A-Za-z0-9]/.test(password)) score++;
-
-    return score;
+// Strength (0-100) is calculated by the server, so passwords never reach the page.
+function passwordScore(record) {
+    return Math.round((record.strength || 0) / 20);
 }
 
 function analyzeVault() {
@@ -464,7 +467,7 @@ function analyzeVault() {
     }
 
     const average = logins.reduce(
-        (sum, r) => sum + passwordScore(r.password),
+        (sum, r) => sum + passwordScore(r),
         0
     ) / (logins.length * 5);
 
@@ -686,7 +689,7 @@ function renderSecurityPage() {
     const health = analyzeVault();
 
     const weak = activeRecords().filter(
-        r => r.type === "Login" && passwordScore(r.password) < 3
+        r => r.type === "Login" && (passwordScore(r) < 3 || r.reused)
     );
 
     return `
@@ -730,7 +733,7 @@ function renderSecurityPage() {
                                 <strong>${escapeHTML(r.title)}</strong>
                                 <br>
                                 <small>
-                                    Consider replacing this weak password.
+                                    ${r.reused ? "This password is reused on another login." : "Consider replacing this weak password."}
                                 </small>
                             </div>
 
@@ -788,6 +791,37 @@ function renderSettings() {
 
             <div class="panel-title">
                 <div>
+                    <h3>Master password</h3>
+                    <p>Re-encrypts your whole vault with a new master password.</p>
+                </div>
+            </div>
+
+            <form id="changePasswordForm" class="settings-form" autocomplete="off">
+                <label for="cpCurrent">Current master password</label>
+                <input id="cpCurrent" type="password" maxlength="1024" required
+                    autocomplete="current-password" spellcheck="false">
+
+                <label for="cpNew">New master password</label>
+                <input id="cpNew" type="password" maxlength="1024" required
+                    autocomplete="new-password" spellcheck="false">
+                <div class="strength"><i id="cpStrength"></i></div>
+
+                <label for="cpConfirm">Confirm new master password</label>
+                <input id="cpConfirm" type="password" maxlength="1024" required
+                    autocomplete="new-password" spellcheck="false">
+
+                <p class="form-error" id="cpError"></p>
+
+                <button type="submit" class="primary-button" id="cpSubmit">
+                    Change master password
+                </button>
+            </form>
+        </div>
+
+        <div class="panel">
+
+            <div class="panel-title">
+                <div>
                     <h3>General settings</h3>
                     <p>VaultX preferences and information.</p>
                 </div>
@@ -798,23 +832,23 @@ function renderSettings() {
                     <strong>Application</strong>
                     <p>VaultX password manager</p>
                 </div>
-                <span>v1.0</span>
+                <span>v1.1</span>
             </div>
 
             <div class="settings-row">
                 <div>
-                    <strong>Storage mode</strong>
-                    <p>Encrypted SQLite database</p>
+                    <strong>Storage</strong>
+                    <p>Everything (fields, notes, flags) is encrypted in a local SQLite file</p>
                 </div>
                 <span>Local</span>
             </div>
 
             <div class="settings-row">
                 <div>
-                    <strong>Backend connection</strong>
-                    <p>C++ Crow API</p>
+                    <strong>Auto-lock</strong>
+                    <p>The vault locks itself after 15 minutes of inactivity</p>
                 </div>
-                <span>${isUnlocked ? "Connected" : "Locked"}</span>
+                <span>15 min</span>
             </div>
 
             <div class="settings-row">
@@ -822,7 +856,7 @@ function renderSettings() {
                     <strong>Vault status</strong>
                     <p>${isUnlocked ? "Vault is unlocked" : "Vault is locked"}</p>
                 </div>
-                <span>${isUnlocked ? "Unlocked" : "Locked"}</span>
+                <button class="secondary-button" id="lockNowButton">Lock now</button>
             </div>
 
             <div class="settings-row">
@@ -838,6 +872,8 @@ function renderSettings() {
         </div>
     `;
 }
+
+let lastRenderKey = "";
 
 function render() {
     if (!$("pageContent")) return;
@@ -911,6 +947,15 @@ function render() {
     } else if (currentPage === "settings") {
 
         $("pageContent").innerHTML = renderSettings();
+    }
+
+    const renderKey = [currentPage, currentCategory, isUnlocked].join("|");
+
+    if (renderKey !== lastRenderKey) {
+        lastRenderKey = renderKey;
+        $("pageContent").classList.remove("page-in");
+        void $("pageContent").offsetWidth;
+        $("pageContent").classList.add("page-in");
     }
 
     $("newItemButton").style.display =
@@ -1071,14 +1116,25 @@ async function saveItem(event) {
     }
 }
 
-let detailsId = null;
+let detailsRecord = null;
 
-function showDetails(id) {
-    const item = records.find(r => r.id === id);
+// Secrets and notes are only fetched when an item is opened.
+async function fetchFull(id) {
+    return normalizeRecord(
+        await apiRequest(`/api/entries/${encodeURIComponent(id)}`)
+    );
+}
 
-    if (!item) return;
+async function showDetails(id) {
+    let item;
 
-    detailsId = id;
+    try {
+        item = await fetchFull(id);
+    } catch (error) {
+        return showToast(`Could not open record: ${error.message}`);
+    }
+
+    detailsRecord = item;
     $("detailsTitle").textContent = item.title;
 
     const inTrash = item.deleted;
@@ -1129,10 +1185,14 @@ function showDetails(id) {
     openModal("detailsModal");
 }
 
-function editItem(id) {
-    const item = records.find(r => r.id === id);
+async function editItem(id) {
+    let item;
 
-    if (!item) return;
+    try {
+        item = await fetchFull(id);
+    } catch (error) {
+        return showToast(`Could not open record: ${error.message}`);
+    }
 
     editingId = id;
 
@@ -1225,25 +1285,23 @@ async function toggleFavorite(id) {
 
     if (!item) return;
 
-    try {
+    const next = !item.favorite;
 
+    item.favorite = next;  // update instantly, undo if the server refuses
+    render();
+
+    try {
         await apiRequest(
             `/api/entries/${encodeURIComponent(id)}/favorite`,
             {
                 method: "PATCH",
-                body: JSON.stringify({
-                    favorite: !item.favorite
-                })
+                body: JSON.stringify({ favorite: next })
             }
         );
-
-        await loadEntries();
-
     } catch (error) {
-
-        showToast(
-            `Could not update favorite: ${error.message}`
-        );
+        item.favorite = !next;
+        render();
+        showToast(`Could not update favorite: ${error.message}`);
     }
 }
 
@@ -1486,6 +1544,71 @@ $("typeFields").addEventListener("click", event => {
     }
 });
 
+$("pageContent").addEventListener("input", event => {
+    if (event.target.id !== "cpNew") return;
+
+    const bar = $("cpStrength");
+    const score = masterScore(event.target.value);
+
+    bar.style.width = `${score * 25}%`;
+    bar.style.background =
+        ["#f07178", "#f07178", "#f5b84b", "#6cc17a", "#35c995"][score];
+});
+
+$("pageContent").addEventListener("click", event => {
+    if (event.target.closest("#lockNowButton")) lockVault();
+});
+
+$("pageContent").addEventListener("submit", async event => {
+    if (event.target.id !== "changePasswordForm") return;
+
+    event.preventDefault();
+
+    const current = $("cpCurrent").value;
+    const next = $("cpNew").value;
+    const error = $("cpError");
+    const button = $("cpSubmit");
+
+    error.textContent = "";
+
+    if (next.length < 10) {
+        error.textContent = "Use at least 10 characters.";
+        return;
+    }
+
+    if (next !== $("cpConfirm").value) {
+        error.textContent = "The new passwords do not match.";
+        return;
+    }
+
+    if (next === current) {
+        error.textContent = "The new password must be different.";
+        return;
+    }
+
+    button.disabled = true;
+    button.textContent = "Re-encrypting vault…";
+
+    try {
+        await apiRequest("/api/change-password", {
+            method: "POST",
+            body: JSON.stringify({ current, next })
+        });
+
+        event.target.reset();
+        $("cpStrength").style.width = "0";
+
+        showToast("Master password changed. Your vault was re-encrypted.");
+
+    } catch (err) {
+        error.textContent = err.message;
+
+    } finally {
+        button.disabled = false;
+        button.textContent = "Change master password";
+    }
+});
+
 $("unlockForm").addEventListener("submit", submitUnlock);
 $("unlockPassword").addEventListener("input", updateUnlockStrength);
 
@@ -1612,7 +1735,7 @@ $("detailsContent").addEventListener("click", event => {
 
     if (!button) return;
 
-    const item = records.find(r => r.id === detailsId);
+    const item = detailsRecord;
 
     if (button.dataset.reveal && item) {
         const key = button.dataset.reveal;
@@ -1649,8 +1772,7 @@ document.addEventListener("keydown", event => {
         [
             "itemModal",
             "generatorModal",
-            "detailsModal",
-            "unlockModal"
+            "detailsModal"
         ].forEach(closeModal);
     }
 });

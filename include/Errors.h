@@ -4,6 +4,8 @@
 #include <stdexcept>
 #include <string>
 
+using namespace std;
+
 // An error that maps directly to an HTTP status code.
 class ApiError : public std::runtime_error {
     int statusCode;

@@ -187,34 +187,33 @@
     </div>
 </div>
 
-<!-- Unlock / create vault modal -->
-<div class="modal-backdrop hidden" id="unlockModal">
-    <div class="modal small-modal">
-        <div class="modal-header">
-            <div>
-                <div class="eyebrow" id="unlockEyebrow">WELCOME BACK</div>
-                <h2 id="unlockTitle">Unlock vault</h2>
-            </div>
-            <button class="close-button" data-close="unlockModal">×</button>
+<!-- Lock screen -->
+<div class="lock-screen hidden" id="unlockModal">
+    <form class="lock-card" id="unlockForm" autocomplete="off">
+        <div class="lock-logo">V</div>
+        <h2 id="unlockTitle">Unlock VaultX</h2>
+        <p class="lock-sub" id="unlockHint"></p>
+
+        <div class="lock-field">
+            <input id="unlockPassword" type="password" placeholder="Master password"
+                maxlength="1024" required autocomplete="current-password" spellcheck="false">
+            <button type="button" class="lock-eye" id="toggleUnlock">Show</button>
         </div>
-        <form id="unlockForm" autocomplete="off">
-            <p class="modal-hint" id="unlockHint"></p>
-            <label for="unlockPassword">Master password</label>
-            <div class="input-with-action">
-                <input id="unlockPassword" type="password" maxlength="1024" required autocomplete="current-password">
-                <button type="button" class="inline-button" id="toggleUnlock">Show</button>
+
+        <div id="confirmBlock" class="hidden">
+            <div class="lock-field">
+                <input id="unlockConfirm" type="password" placeholder="Confirm master password"
+                    maxlength="1024" autocomplete="new-password" spellcheck="false">
             </div>
-            <div id="confirmBlock" class="hidden">
-                <label for="unlockConfirm">Confirm master password</label>
-                <input id="unlockConfirm" type="password" maxlength="1024" autocomplete="new-password">
-                <div class="strength"><i id="unlockStrength"></i></div>
-            </div>
-            <p class="form-error" id="unlockError"></p>
-            <div class="modal-actions">
-                <button type="submit" class="primary-button" id="unlockSubmit">Unlock</button>
-            </div>
-        </form>
-    </div>
+            <div class="strength"><i id="unlockStrength"></i></div>
+        </div>
+
+        <p class="form-error" id="unlockError"></p>
+
+        <button type="submit" class="primary-button lock-button" id="unlockSubmit">Unlock</button>
+
+        <p class="lock-foot">Encrypted on this device &middot; nothing leaves your computer</p>
+    </form>
 </div>
 
 <div class="toast" id="toast"></div>

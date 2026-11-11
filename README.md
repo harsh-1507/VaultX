@@ -1,423 +1,320 @@
-# VaultX 🔐
-### Local-First Encrypted Password & Credential Manager
+# VaultX
 
-**VaultX** is a password and credential manager built using **C++17, Object-Oriented Programming, Crow, SQLite and OpenSSL**.
+**A local, single-user, encrypted password and credential manager written in object-oriented C++17.**
 
-It provides a local vault for managing sensitive information through a modern web interface, with a separate console application also available.
+Built with **Crow** (REST API), **SQLite**, **OpenSSL** and a plain **HTML / CSS / Vanilla JS** frontend, with a console (CLI) version that shares the same vault.
 
-The project focuses on modular C++ architecture, object-oriented design, database management, REST API development and applied cryptography.
+**Made by Harsh Lotiya** · GitHub: [@harsh-1507](https://github.com/harsh-1507)
 
-> **Local-first by design:** VaultX runs on your own machine and stores its database locally. It does not require a cloud account or a hosted database.
-
----
-
-## ✨ Features
-
-### 🔐 Vault Management
-- Master password-based vault initialization and authentication.
-- Lock and unlock functionality.
-- Automatic vault locking after inactivity.
-- Login attempt throttling.
-- Master password change functionality.
-
-### 🗂️ Credential Management
-Supports six types of credentials:
-
-- Login credentials
-- Secure notes
-- Credit/debit cards
-- Identity information
-- API keys
-- Wi-Fi credentials
-
-Additional functionality:
-- Create, view, edit and delete entries.
-- Mark entries as favorites.
-- Move entries to Trash.
-- Restore or permanently delete trashed entries.
-- Organize and manage saved credentials.
-
-### 🛠️ Password Tools
-- Password generation.
-- Password strength analysis.
-- Credential-specific validation.
-
-### 🖥️ User Interface
-- Modern dark-themed interface.
-- Dashboard for managing credentials.
-- Search and category-based organization.
-- Favorites and Trash sections.
-- Interactive entry management.
+> Personal / educational project. It has **not** been independently security-audited. Do not rely on it as your only copy of important credentials.
 
 ---
 
-## 🛠️ Tech Stack
+## Table of contents
 
-| Technology | Usage |
+1. [Features](#features)
+2. [Project status (read this first)](#project-status-read-this-first)
+3. [Folder structure](#folder-structure)
+4. [Requirements](#requirements)
+5. [Setup on Windows (MSYS2 UCRT64)](#setup-on-windows-msys2-ucrt64)
+6. [Build with CMake](#build-with-cmake)
+7. [Build without CMake (PowerShell / MinGW)](#build-without-cmake-powershell--mingw)
+8. [Running VaultX](#running-vaultx)
+9. [Configuration (environment variables)](#configuration-environment-variables)
+10. [Running the tests](#running-the-tests)
+11. [Architecture and OOP design](#architecture-and-oop-design)
+12. [Security design](#security-design)
+13. [Encryption format and migration](#encryption-format-and-migration)
+14. [REST API](#rest-api)
+15. [Known limitations](#known-limitations)
+16. [Interview talking points](#interview-talking-points)
+17. [Author](#author)
+
+---
+
+## Features
+
+- Six item types: **Login, Secure Note, Card, Identity, API Key, Wi-Fi** (added by writing one `Entry` subclass).
+- Folders, favourites, trash and restore, duplicate detection.
+- Password strength analysis, reuse detection and a cryptographically secure password generator.
+- Master-password change that re-encrypts the whole vault in **one atomic transaction**.
+- Web UI (`frontend/`) and a console app, both on the same database.
+- Server binds to `127.0.0.1` only, validates `Host` / `Origin`, throttles unlock attempts and auto-locks after 15 idle minutes.
+
+## Project status (read this first)
+
+This repository went through a backend security and reliability audit. This table states exactly what is done and what is **not**, so nothing is overstated.
+
+| Area | Status | How it was checked |
+|---|---|---|
+| Master password no longer stored in memory | Done | Unit tests (`test_vault`) |
+| Self-wiping key buffers (`CleansingAllocator`), `KeyCache` rewrite | Done | Unit tests |
+| AES-256-GCM record-ID binding (AAD) + format versioning | Done | Unit tests, incl. a fixture produced by the original code |
+| Safe migration of existing records (backup first, opt-in bulk upgrade) | Done | Unit tests |
+| Database rewrite (RAII transactions, validation, mutex, backup, schema migration) | Done | Unit tests (16 cases) |
+| Database location resolver (`VAULTX_DB`, app-data opt-in) | Done | Compiled; used by the CLI |
+| `LoginThrottle` rewrite, `ApiValidation` helpers (separate files) | Written and compiled | Not yet wired into `ApiServer` |
+| Auto-lock logic inside `PasswordVault` | Done | Unit tests |
+| **`ApiServer` rewrite (clean shutdown instead of detached thread, request limits, ID validation)** | **NOT done yet** | `ApiServer.cpp` is still the original |
+| **API integration tests, CMake/CTest wiring for tests** | **NOT done yet** | - |
+
+Measured test results (built and run on Linux, GCC 13.3, real OpenSSL / SQLite libraries):
+
+| Suite | Result |
 |---|---|
-| **C++17** | Backend logic and OOP architecture |
-| **Crow** | HTTP server and REST APIs |
-| **SQLite** | Local persistent storage |
-| **OpenSSL** | Encryption and cryptographic operations |
-| **HTML5** | Frontend structure |
-| **CSS3** | Styling and layout |
-| **JavaScript** | Frontend functionality and API communication |
-| **CMake** | Build system |
+| `test_crypto` | 12 / 12 passed |
+| `test_database` | 16 / 16 passed |
+| `test_vault` | 31 / 32 passed. The one failure, `failed_update_keeps_the_old_record`, is a bug in the **test** (the failure-injecting cipher only fails on one numbered call, so the second assertion never fails). It is not yet fixed. |
 
----
+Honest caveats:
+- `ApiServer.cpp`, `server.cpp` and the web UI were **not compiled or run** in the audit environment (Crow and asio were unavailable there). Build them yourself with the commands below. The vault, database and crypto code were compiled against the real OpenSSL and SQLite libraries, but `Entry` JSON handling was exercised through a small stand-in for Crow's JSON header, not the real one.
+- Until `ApiServer` is updated, the detached idle-watcher thread issue and the missing request-size limits still exist.
 
-## 🏗️ System Architecture
+## Folder structure
 
-VaultX uses a modular architecture that separates frontend interactions, API handling, vault operations, cryptographic functionality and persistent storage.
-
-```text
-             ┌─────────────────────────┐
-             │      Web Frontend       │
-             │     HTML / CSS / JS     │
-             └────────────┬────────────┘
-                          │
-                       HTTP/JSON
-                          │
-                          ▼
-             ┌─────────────────────────┐
-             │       Crow Server      │
-             │       REST API         │
-             └────────────┬────────────┘
-                          │
-                          ▼
-             ┌─────────────────────────┐
-             │      PasswordVault     │
-             │     Vault Operations   │
-             └────────────┬────────────┘
-                          │
-                 ┌────────┴────────┐
-                 │                 │
-                 ▼                 ▼
-        ┌────────────────┐  ┌────────────────┐
-        │  Crypto Module │  │ Database Layer │
-        │    OpenSSL     │  │     SQLite     │
-        └────────────────┘  └────────────────┘
 ```
-
-### Application Flow
-
-1. The user interacts with the frontend.
-2. The frontend communicates with the local Crow server through HTTP requests.
-3. The API server handles requests and coordinates vault operations.
-4. `PasswordVault` manages credential operations through abstract interfaces.
-5. The cryptographic module encrypts and decrypts sensitive data.
-6. SQLite provides persistent local storage.
-
-VaultX also includes a console application that uses the same core backend components without the web interface.
-
----
-
-## 🧩 Object-Oriented Design
-
-A central objective of VaultX is applying OOP concepts to a practical C++ application.
-
-| OOP Concept | Implementation |
-|---|---|
-| **Abstraction** | `Cipher`, `Storage` and `Entry` interfaces |
-| **Inheritance** | Specialized credential classes inherit from common abstractions |
-| **Polymorphism** | Virtual functions and `unique_ptr<Entry>` for handling different entry types |
-| **Encapsulation** | Internal state managed by dedicated classes |
-| **Factory Pattern** | `EntryFactory` creates appropriate credential types |
-| **Template Method** | Common encryption workflow in the `Cipher` abstraction |
-| **CRTP** | `CloneableEntry` for reusable cloning behavior |
-| **Prototype Pattern** | Credential objects support polymorphic cloning |
-| **RAII** | SQLite statements and OpenSSL contexts use resource-management techniques |
-
-### Core Components
-
-| Class / Component | Responsibility |
-|---|---|
-| `Entry` | Abstract representation of a credential |
-| `LoginEntry` | Login credential representation |
-| `SecureNoteEntry` | Secure note representation |
-| `CardEntry` | Card information |
-| `IdentityEntry` | Identity information |
-| `ApiKeyEntry` | API key information |
-| `WifiEntry` | Wi-Fi credentials |
-| `EntryFactory` | Creates credential objects |
-| `Storage` | Abstract storage interface |
-| `Database` | SQLite storage implementation |
-| `Cipher` | Abstract cryptographic interface |
-| `AesGcmCipher` | AES-GCM cryptographic implementation |
-| `PasswordVault` | Coordinates vault operations |
-| `KeyCache` | Manages cached key-related data |
-| `ApiServer` | Handles HTTP requests |
-| `PasswordGenerator` | Generates passwords |
-| `PasswordAnalyzer` | Analyzes password strength |
-
-Adding another credential type can be done by introducing a new entry subclass and registering it with the factory.
-
----
-
-## 🔒 Security Architecture
-
-VaultX uses cryptographic techniques to protect stored credentials.
-
-### 1. Key Derivation
-
-The master password is processed using:
-
-**PBKDF2-HMAC-SHA256**
-
-- 600,000 iterations.
-- Random salt.
-- 256-bit derived key.
-
-This makes password-based key derivation more computationally expensive and helps protect against rapid offline password guessing.
-
-### 2. Authenticated Encryption
-
-VaultX uses:
-
-**AES-256-GCM**
-
-Important properties:
-
-- 256-bit encryption key.
-- Fresh random nonce for each encryption operation.
-- Authentication tag for integrity verification.
-- Decryption verifies authenticity before accepting the plaintext.
-
-### 3. Credential Storage
-
-- Sensitive credential information is encrypted before database storage.
-- Entry lists are designed to return metadata rather than expose credential secrets.
-- Full credential information is retrieved when an entry is opened.
-- Master password changes re-encrypt the vault within a database transaction.
-
-### 4. Additional Protections
-
-- Master password verification.
-- Unlock attempt throttling.
-- Automatic vault locking.
-- Localhost-only server binding.
-- Host and Origin checks.
-- Sensitive key cleanup when locking the vault.
-
-> **Security disclaimer:** VaultX is an educational and portfolio project. It has not undergone an independent security audit and should not be considered a production-certified password manager.
-
----
-
-## 🗄️ Database Design
-
-VaultX uses SQLite for persistent local storage.
-
-The main tables are:
-
-### `password_entries`
-
-Stores encrypted credential records and their associated metadata.
-
-| Column | Purpose |
-|---|---|
-| `id` | Credential identifier |
-| `salt` | Encryption-related salt |
-| `nonce` | Encryption nonce |
-| `ciphertext` | Encrypted credential data |
-| `auth_tag` | GCM authentication tag |
-| `favorite` | Favorite status |
-| `deleted` | Trash status |
-
-### `vault_metadata`
-
-Stores vault-level information required for initialization and master password verification.
-
-Database migrations are used to evolve the schema without requiring users to delete their existing database.
-
----
-
-## 📁 Project Structure
-
-```text
 VaultX/
-│
-├── include/
-│   ├── ApiServer.h
-│   ├── Crypto.h
-│   ├── Database.h
-│   ├── Entry.h
-│   ├── EntryTypes.h
-│   ├── Errors.h
-│   ├── KeyCache.h
-│   ├── PasswordAnalyzer.h
-│   ├── PasswordGenerator.h
-│   ├── PasswordVault.h
-│   └── Storage.h
-│
-├── src/
-│   ├── ApiServer.cpp
-│   ├── Crypto.cpp
-│   ├── Database.cpp
-│   ├── Entry.cpp
-│   ├── EntryTypes.cpp
-│   ├── PasswordAnalyzer.cpp
-│   ├── PasswordGenerator.cpp
-│   ├── PasswordVault.cpp
-│   ├── main.cpp
-│   └── server.cpp
-│
-├── frontend/
-│   ├── index.html
-│   ├── css/
-│   │   └── style.css
-│   └── js/
-│       └── app.js
-│
-├── third_party/
-│   └── Crow/
-│
 ├── CMakeLists.txt
 ├── README.md
-└── .gitignore
+├── include/                     class declarations
+│   ├── ApiServer.h              HTTP layer (Crow routes, middleware)
+│   ├── ApiValidation.h          request checks: ids, JSON depth, static names
+│   ├── Crypto.h                 Cipher (abstract), AesGcmCipher, EncryptedData
+│   ├── Database.h               SQLite implementation of Storage
+│   ├── DatabaseLocation.h       where the .db file lives
+│   ├── Entry.h / EntryTypes.h   Entry (abstract) + 6 concrete types + factory
+│   ├── Errors.h                 ApiError (carries an HTTP status)
+│   ├── KeyCache.h               thread-safe cache of derived keys
+│   ├── LoginThrottle.h          unlock-attempt throttling
+│   ├── PasswordAnalyzer.h / PasswordGenerator.h
+│   ├── PasswordVault.h          the unlocked session and all entries
+│   ├── SecureMemory.h           self-wiping Bytes, wipe(), StringWiper
+│   └── Storage.h                persistence interface (abstract)
+├── src/                         implementations + two entry points
+│   ├── server.cpp               web entry point
+│   └── main.cpp                 console entry point
+├── tests/                       dependency-free test suite (see below)
+├── frontend/                    index.html, css/style.css, js/app.js
+└── third_party/Crow/            Crow (you clone it, see setup)
 ```
 
----
+## Requirements
 
-## ⚙️ Installation & Setup
+| Requirement | Version |
+|---|---|
+| C++ compiler with C++17 and `<filesystem>` | GCC 9+ (developed with GCC 13) |
+| CMake (optional, for the CMake build) | 3.16+ |
+| OpenSSL | 3.x (development headers) |
+| SQLite3 | 3.16+ (development headers) |
+| asio (standalone, header-only) | any recent version |
+| Crow (header-only) | 1.x, placed in `third_party/Crow` |
+| Git | any |
 
-### Prerequisites
+Windows is supported through **MSYS2 UCRT64**. Linux and macOS work with the same sources.
 
-Make sure you have:
+## Setup on Windows (MSYS2 UCRT64)
 
-- C++17-compatible compiler.
-- GCC / MinGW or MSVC.
-- CMake (recommended).
-- OpenSSL development libraries.
-- SQLite3 development libraries.
-- Standalone Asio headers.
-- Crow headers.
+1. Install MSYS2 from <https://www.msys2.org> and open the **MSYS2 UCRT64** terminal.
+2. Install the toolchain and libraries:
 
-**Important:** The source ZIP does not include the Crow dependency. Place the Crow headers inside `third_party/Crow/` before building.
+```bash
+pacman -Syu
+pacman -S --needed mingw-w64-ucrt-x86_64-gcc \
+                   mingw-w64-ucrt-x86_64-cmake \
+                   mingw-w64-ucrt-x86_64-ninja \
+                   mingw-w64-ucrt-x86_64-openssl \
+                   mingw-w64-ucrt-x86_64-sqlite3 \
+                   mingw-w64-ucrt-x86_64-asio \
+                   git
+```
 
-### 1. Clone the repository
+3. Get the project and Crow:
 
-Open PowerShell:
-
-```powershell
-git clone https://github.com/harsh-1507/VaultX.git
+```bash
+git clone https://github.com/harsh-1507/<your-repo-name>.git VaultX
 cd VaultX
+git clone --depth 1 https://github.com/CrowCpp/Crow.git third_party/Crow
 ```
 
-If your repository uses a different capitalization or name, adjust the URL accordingly.
-
-### 2. Build using CMake (Recommended)
-
-Configure the project:
+4. For PowerShell, add the UCRT64 tools to `PATH` for the session (adjust the path if MSYS2 is installed elsewhere):
 
 ```powershell
-cmake -S . -B build -G "MinGW Makefiles"
+$env:Path = "C:\msys64\ucrt64\bin;" + $env:Path
+g++ --version
 ```
 
-Build both applications:
+**Linux (Debian/Ubuntu):**
+
+```bash
+sudo apt install build-essential cmake libssl-dev libsqlite3-dev libasio-dev git
+git clone --depth 1 https://github.com/CrowCpp/Crow.git third_party/Crow
+```
+
+## Build with CMake
+
+```bash
+# configure + build (Release)
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+
+# Debug build
+cmake -S . -B build-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-debug
+```
+
+Without Ninja, drop `-G Ninja` (on MSYS2 use `-G "MinGW Makefiles"`). Outputs: `build/vaultx_server` (web + API) and `build/vaultx_cli` (console); `.exe` on Windows.
+
+## Build without CMake (PowerShell / MinGW)
+
+Run from the project root, with the UCRT64 `bin` folder on `PATH` (see setup step 4).
+
+**Web server:**
 
 ```powershell
-cmake --build build --config Release
+g++ -std=c++17 -O2 -Iinclude -Ithird_party/Crow/include src/server.cpp src/Crypto.cpp src/Database.cpp src/DatabaseLocation.cpp src/Entry.cpp src/EntryTypes.cpp src/PasswordVault.cpp src/PasswordAnalyzer.cpp src/PasswordGenerator.cpp src/ApiServer.cpp -o vaultx_server.exe -lssl -lcrypto -lsqlite3 -lws2_32 -lmswsock
 ```
 
-### 3. Run the Web Application
+**Console app:**
 
 ```powershell
-.\build\vaultx_server.exe
+g++ -std=c++17 -O2 -Iinclude -Ithird_party/Crow/include src/main.cpp src/Crypto.cpp src/Database.cpp src/DatabaseLocation.cpp src/Entry.cpp src/EntryTypes.cpp src/PasswordVault.cpp src/PasswordAnalyzer.cpp src/PasswordGenerator.cpp src/ApiServer.cpp -o vaultx_cli.exe -lssl -lcrypto -lsqlite3 -lws2_32 -lmswsock
 ```
 
-Open the following address in your browser:
+On Linux/macOS use the same commands, remove `-lws2_32 -lmswsock`, add `-lpthread`, and drop `.exe`.
 
-```text
-http://127.0.0.1:18080
-```
+## Running VaultX
 
-### 4. Run the Console Application
-
-Open another PowerShell terminal in the project directory:
+Run from the **project folder** so the server can find `frontend/`.
 
 ```powershell
-.\build\vaultx_cli.exe
+.\build\vaultx_server.exe        # or .\vaultx_server.exe
+# open http://127.0.0.1:18080
+.\build\vaultx_cli.exe           # console version, same vault
 ```
 
-Both applications use the same core components and local database.
+On the first launch you create the vault by choosing a master password (at least 10 characters and not weak). **If you forget it, the data cannot be recovered.**
 
----
+## Configuration (environment variables)
 
-## 🪟 Manual Build Using PowerShell (Without CMake)
+| Variable | Meaning |
+|---|---|
+| `VAULTX_DB` | Explicit database path. Always wins. |
+| `VAULTX_USE_APPDATA=1` | Use the per-user data folder (`%APPDATA%\VaultX\vaultx.db` on Windows, `$XDG_DATA_HOME/vaultx` or `~/.local/share/vaultx` on Linux). |
+| `VAULTX_UPGRADE_RECORDS=1` | Opt in to upgrading old-format records at each unlock (a backup is written first). Off by default. |
 
-If CMake is unavailable or the CMake build fails, you can compile the project directly using GCC.
-
-**Requirements:** GCC, Crow, Asio, SQLite3 and OpenSSL must already be installed and accessible to the compiler.
-
-Run these commands from the **VaultX project root directory**.
-
-### 1. Compile the Web Server
+Default (nothing set): `vaultx.db` in the folder you start VaultX from, exactly as before. The default never changes by itself and existing databases are never moved or deleted.
 
 ```powershell
-g++ -std=c++17 -O2 -Iinclude -Ithird_party/Crow/include src/server.cpp src/Crypto.cpp src/Database.cpp src/Entry.cpp src/EntryTypes.cpp src/PasswordVault.cpp src/PasswordAnalyzer.cpp src/PasswordGenerator.cpp src/ApiServer.cpp -o vaultx_server.exe -lssl -lcrypto -lsqlite3 -lws2_32 -lmswsock
-```
-
-### 2. Run the Web Server
-
-```powershell
+$env:VAULTX_DB = "D:\VaultXData\vaultx.db"
 .\vaultx_server.exe
 ```
 
-Open:
+## Running the tests
 
-```text
-http://127.0.0.1:18080
-```
+The tests need no external framework (`tests/TestFramework.h` is a small self-contained harness) and only ever use temporary databases, **never your real `vaultx.db`**.
 
-### 3. Compile the Console Application
+Compile and run (PowerShell or Linux; add `-lws2_32 -lmswsock` on Windows, `-lpthread` on Linux):
 
 ```powershell
-g++ -std=c++17 -O2 -Iinclude -Ithird_party/Crow/include src/main.cpp src/Crypto.cpp src/Database.cpp src/Entry.cpp src/EntryTypes.cpp src/PasswordVault.cpp src/PasswordAnalyzer.cpp src/PasswordGenerator.cpp src/ApiServer.cpp -o vaultx_cli.exe -lssl -lcrypto -lsqlite3 -lws2_32 -lmswsock
+# Crypto
+g++ -std=c++17 -O1 -Iinclude -Itests -Ithird_party/Crow/include tests/test_main.cpp tests/test_crypto.cpp src/Crypto.cpp -o test_crypto -lssl -lcrypto -lsqlite3
+./test_crypto
+
+# Database
+g++ -std=c++17 -O1 -Iinclude -Itests -Ithird_party/Crow/include tests/test_main.cpp tests/test_database.cpp src/Crypto.cpp src/Database.cpp -o test_database -lssl -lcrypto -lsqlite3
+./test_database
+
+# PasswordVault + KeyCache
+g++ -std=c++17 -O1 -Iinclude -Itests -Ithird_party/Crow/include tests/test_main.cpp tests/test_vault.cpp src/Crypto.cpp src/Database.cpp src/Entry.cpp src/EntryTypes.cpp src/PasswordVault.cpp src/PasswordAnalyzer.cpp -o test_vault -lssl -lcrypto -lsqlite3
+./test_vault
 ```
 
-### 4. Run the Console Application
+Pass a name fragment to run a subset, e.g. `./test_vault auto_lock`. Each executable exits non-zero if any case fails.
 
-```powershell
-.\vaultx_cli.exe
-```
+What is covered:
+- **Crypto:** round trip, wrong key, modified ciphertext / tag / nonce, AAD mismatch, downgrade attempt, random salt and nonce uniqueness, and decryption of a record produced by the original pre-AAD code.
+- **Database:** initialization, create/read/edit/delete, invalid ids and data, rollback on failure, restart persistence, old-schema migration with backup, backup copy, 8-thread concurrent access.
+- **PasswordVault:** initialization, correct/incorrect password, lock/unlock, CRUD, favourites/trash/restore, password change (success, validation, atomicity, refusal cases), AAD tampering (swapped, copied, renumbered, downgraded records), legacy migration, auto-lock, key cache.
 
-### Troubleshooting
+CMake/CTest wiring for these tests and the API integration tests are **not added yet** (see status).
 
-| Error | What to check |
+## Architecture and OOP design
+
+| Concept | Where |
 |---|---|
-| `g++ is not recognized` | Install GCC and add its `bin` directory to PATH |
-| `cmake is not recognized` | Install CMake or use the manual GCC commands |
-| `crow.h: No such file` | Check `third_party/Crow/include` |
-| `asio.hpp: No such file` | Install standalone Asio and configure its include path |
-| `sqlite3.h: No such file` | Install SQLite development headers |
-| `openssl/evp.h: No such file` | Install OpenSSL development headers |
-| `cannot find -lcrypto` | Configure the OpenSSL library path |
-| `cannot find -lsqlite3` | Configure the SQLite library path |
+| **Abstraction** | `Cipher`, `Storage`, `Entry` are abstract interfaces |
+| **Inheritance** | `AesGcmCipher : Cipher`, `Database : Storage`, `LoginEntry`, `SecureNoteEntry`, `CardEntry`, `IdentityEntry`, `ApiKeyEntry`, `WifiEntry` : `CloneableEntry<T>` : `Entry` |
+| **Polymorphism** | `PasswordVault` and `ApiServer` use `unique_ptr<Entry>` and virtual functions; the vault depends only on `Storage&` and `const Cipher&` |
+| **Encapsulation** | private state in `PasswordVault`, `Database`, `KeyCache`, `LoginThrottle` |
+| **Patterns** | Factory (`EntryFactory`), Template Method (`Cipher::encrypt`), CRTP (`CloneableEntry`), Prototype (`Entry::clone`), RAII (SQLite statements and transactions, OpenSSL contexts, `StringWiper`, `CleansingAllocator`) |
 
-**Note:** The manual commands assume your compiler can already locate the required headers and libraries. Installing a dependency alone does not necessarily add its paths to GCC.
+Flow: `server.cpp` / `main.cpp` create `Database` + `AesGcmCipher` -> `PasswordVault` -> `ApiServer` (web) or `ConsoleApp` (terminal). Because the vault only sees interfaces, the tests swap in a faster `FastCipher` and a failure-injecting `FailingCipher` without changing any production code.
 
----
+## Security design
 
-## 🎯 Learning Outcomes
+- **Encryption:** AES-256-GCM, fresh random 96-bit nonce per encryption. Keys from PBKDF2-HMAC-SHA256, 600,000 iterations, 16-byte random salt.
+- **Master password is never stored.** It is used only inside `unlock()` / `changePassword()`. The session keeps the derived key only; changing the password verifies the old one by re-deriving and comparing in constant time (`CRYPTO_memcmp`).
+- **Key hygiene:** all binary buffers use `CleansingAllocator` (wipes with `OPENSSL_cleanse` on free and on reallocation), so temporary key copies are erased on every exit path, including exceptions. `KeyCache` hands out keys by reference under a lock and cleanses on evict, lock and password change. `Entry`'s destructor overwrites decrypted text (best effort). `lock()` clears everything.
+- **Record binding:** each v2 record authenticates its database id as AAD, so moving, copying or renumbering ciphertext fails authentication.
+- **Atomicity:** record insert, password change and format upgrade are single transactions. Unreadable records are **never deleted or rewritten**, and a password change is refused if any record is unreadable or the database changed under the vault.
+- **Database:** RAII transactions, checked bind calls, blob validation, internal mutex, automatic backup before any schema or format migration.
+- **Network:** `127.0.0.1` only, `Host` and `Origin` checks, security headers, `no-store` on API responses, login throttling (5 failures, then 15 s doubling up to 5 min; in memory only, so a restart resets it; never a permanent lockout), 15-minute idle auto-lock.
+- **Logs never contain passwords, keys or plaintext.**
 
-VaultX was built to explore practical applications of:
+## Encryption format and migration
 
-- Modern C++ and object-oriented programming.
-- Abstraction, inheritance and polymorphism.
-- Design patterns and resource management.
-- REST API development using Crow.
-- Relational database management with SQLite.
-- Applied cryptography using OpenSSL.
-- Frontend and backend integration.
-- Modular software architecture.
+| Version | Meaning |
+|---|---|
+| 1 | Original format: AES-256-GCM, no AAD |
+| 2 | Same cipher, with AAD `"VaultX/record/v2/" + record id` |
 
----
+Migration rules (nothing happens to your real data unless you opt in):
+1. Starting the new version adds a `format_version INTEGER NOT NULL DEFAULT 1` column. This is additive; every existing row is "v1". A backup `vaultx.db.pre-schema-v2-<time>.bak` is written first.
+2. v1 records decrypt exactly as before. A v2 record cannot be opened without its AAD and cannot be "downgraded" (the tag covers the AAD).
+3. New or edited records are written as v2. Existing ones are not bulk-rewritten automatically.
+4. Optional bulk upgrade: `VAULTX_UPGRADE_RECORDS=1` writes a second backup (`...pre-aad-upgrade-<time>.bak`), then upgrades all readable v1 records atomically.
+5. Changing the master password re-encrypts everything as v2.
 
-## 👨‍💻 Author
+Trade-off: an **older** VaultX build cannot read v2 records. Until a record is upgraded, it is not ID-bound. The master-password verifier keeps the v1 format.
+
+## REST API
+
+All endpoints are under `http://127.0.0.1:18080`. JSON in, JSON out. Item ids are positive integers.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | Liveness |
+| GET | `/api/status` | `{initialized, unlocked}` |
+| POST | `/api/unlock` | `{masterPassword}` (creates the vault on first use) |
+| POST | `/api/lock` | Lock and wipe the session |
+| POST | `/api/change-password` | `{current, next}` |
+| GET / POST | `/api/entries` | List (no secrets) / create |
+| GET / PUT / DELETE | `/api/entries/{id}` | Full item / update / delete permanently |
+| PATCH | `/api/entries/{id}/favorite` | `{favorite: bool}` |
+| PATCH | `/api/entries/{id}/trash` | `{deleted: bool}` |
+
+Errors return `{"error": "..."}` with 400 (invalid input), 401 (locked / wrong password), 403 (forbidden / wrong current password), 404, 409 (conflict), 429 (throttled), 500.
+
+## Known limitations
+
+- `ApiServer` still contains the original detached idle-watcher thread, has no explicit request-size limit and still uses Crow's `<int>` route parameters. The replacement helpers exist (`ApiValidation.h`, `LoginThrottle.*`, `PasswordVault::lockIfIdle`) but are not wired in yet.
+- No API integration tests and no CMake/CTest test targets yet.
+- Decrypted entries live in `std::string` while unlocked; wiping is best effort. Keys are not locked in RAM (no `mlock` / `VirtualLock`), so the OS may swap them. HTTP and JSON library buffers are outside our control.
+- One process should use a vault at a time; the vault caches entries and does not live-sync with other programs.
+- Not audited; not a substitute for an established password manager.
+
+## Interview talking points
+
+- **Why AAD?** GCM authenticates ciphertext but not where it is stored. Binding the row id stops an attacker with file access from swapping or cloning records undetected.
+- **Why a versioned, opt-in migration?** Cryptographic changes must never make existing data undecryptable, so: additive schema, backup first, atomic upgrade, never delete unreadable rows.
+- **Why not keep the master password?** Smaller blast radius: only derived keys live in memory, and a custom allocator wipes every copy. This forced keys for all legacy salts to be derived at unlock.
+- **Chicken-and-egg ID problem:** AAD needs the row id, but the id exists only after insert. Solved with `insertSealed()`: reserve the id in a transaction, encrypt with it, finish the row, commit, or roll back everything.
+- **Testability through OOP:** the vault depends on `Storage` and `Cipher` interfaces, enabling fast and failure-injecting test doubles.
+- **Honest scope:** known gaps are listed above rather than hidden.
+
+## Author
 
 **Harsh Lotiya**
+GitHub: [github.com/harsh-1507](https://github.com/harsh-1507)
 
-- GitHub: [harsh-1507](https://github.com/harsh-1507)
-
----
-
+Never commit `vaultx.db` (it is in `.gitignore`).
